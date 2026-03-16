@@ -1,0 +1,27 @@
+.git
+**/.git
+node_modules
+**/node_modules
+dist
+build
+bin
+out
+target
+.DS_Store
+
+*.log
+*.zip
+*.tar
+*.gz
+
+# Go 常见产物
+app
+*.exe
+
+# 大文件/截图/文档（按你仓库实际情况删减）
+*.png
+*.jpg
+*.jpeg
+*.pdf
+screenshots
+docs

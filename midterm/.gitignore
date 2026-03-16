@@ -1,0 +1,107 @@
+##################################
+# ===== Terraform =====
+##################################
+
+# Terraform state files
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Terraform variable files (may contain secrets)
+*.tfvars
+*.tfvars.json
+
+# Terraform lock file (optional: keep if you want reproducible builds)
+# .terraform.lock.hcl
+
+# Terraform directory
+.terraform/
+
+##################################
+# ===== AWS / Credentials =====
+##################################
+
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# AWS CLI config (just in case)
+.aws/
+
+##################################
+# ===== Go =====
+##################################
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build output
+/bin/
+/build/
+
+# Test binary
+*.test
+
+# Coverage files
+*.out
+coverage.*
+
+##################################
+# ===== Python / Locust =====
+##################################
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+*.log
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+##################################
+# ===== Docker =====
+##################################
+
+# Docker artifacts
+*.tar
+*.tar.gz
+
+##################################
+# ===== IDE / Editor =====
+##################################
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+##################################
+# ===== OS Files =====
+##################################
+
+.DS_Store
+Thumbs.db
+
+##################################
+# ===== Logs =====
+##################################
+
+*.log
+logs/
+
+##################################
+# ===== Misc =====
+##################################
+
+tmp/
+temp/
