@@ -1,0 +1,52 @@
+#!/bin/bash
+
+echo "🚀 Starting Leaderless Experiments..."
+
+HOST="http://localhost:8080"
+USERS=50
+SPAWN_RATE=10
+DURATION="60s"
+
+RATIOS=("0.01" "0.1" "0.5" "0.9")
+
+echo "🧹 Cleaning old result files..."
+rm -f leaderless_*
+
+for r in "${RATIOS[@]}"
+do
+  echo ""
+  echo "========================================"
+  echo "🔥 Running leaderless test with WRITE_RATIO=$r"
+  echo "========================================"
+
+  WRITE_RATIO=$r RESULT_PREFIX=leaderless_$r locust \
+    -f locustfile.py \
+    --headless \
+    -u $USERS \
+    -r $SPAWN_RATE \
+    -t $DURATION \
+    --host=$HOST \
+    --csv=leaderless_$r
+
+  exit_code=$?
+
+  if [ $exit_code -ne 0 ]; then
+    echo "⚠️ Locust for ratio $r exited with code $exit_code"
+    echo "⚠️ Continuing to next ratio..."
+  else
+    echo "✅ Finished ratio $r"
+  fi
+done
+
+echo ""
+echo "📊 Generating plots..."
+python plot_results.py
+
+echo ""
+echo "🎉 ALL DONE!"
+echo "Generated files:"
+echo "----------------------------------------"
+echo "✔ leaderless_summary_metrics.csv"
+echo "✔ leaderless_summary_dashboard.png"
+echo "✔ leaderless_distribution_dashboard.png"
+echo "----------------------------------------"

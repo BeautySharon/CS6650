@@ -1,0 +1,7 @@
+key,stale_reads,total_reads,stale_rate
+k1,0,796,0.0
+k2,0,759,0.0
+k3,0,784,0.0
+k4,0,850,0.0
+k5,0,766,0.0
+ALL,0,3955,0.0
