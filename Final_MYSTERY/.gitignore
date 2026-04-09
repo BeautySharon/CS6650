@@ -1,0 +1,90 @@
+# =========================
+# Go
+# =========================
+bin/
+build/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace / cache
+go.work
+go.work.sum
+
+# Vendor (如果不用 vendoring 可忽略)
+vendor/
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+*.out
+
+# =========================
+# Environment / Config
+# =========================
+.env
+.env.*
+*.local
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# Terraform
+# =========================
+terraform/.terraform/
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Lock file（可选：一般建议保留）
+# .terraform.lock.hcl
+
+# =========================
+# Docker
+# =========================
+*.tar
+*.img
+
+# =========================
+# Test / Temp
+# =========================
+tmp/
+temp/
+*.tmp
+
+# =========================
+# Misc
+# =========================
+coverage.out
+*.coverprofile
+
+# =========================
+# Secrets / Keys
+# =========================
+*.pem
+*.key
+*.crt
