@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"album-store/internal/model"
@@ -24,12 +26,15 @@ type App struct {
 	S3         *s3util.Client
 	PresignTTL time.Duration
 	UploadJobs chan UploadTask
+	albumCache sync.Map // album_id -> struct{}{}; albums are never deleted so cache is permanent
 }
 
 // UploadTask carries everything a pool worker needs to complete an upload.
-// tmpPath is a file we own — the worker must delete it after use.
+// For small files (≤32 MB), data holds the bytes in memory and tmpPath is empty.
+// For large disk-backed files, tmpPath is set and the worker must os.Remove it.
 type UploadTask struct {
-	tmpPath     string
+	data        []byte // non-nil for in-memory files; avoids disk round-trip
+	tmpPath     string // non-empty for disk-backed files; worker must remove
 	size        int64
 	contentType string
 	key         string
@@ -51,17 +56,27 @@ func (a *App) StartUploadWorkers(n int) {
 // processUpload performs the three post-upload steps for one photo.
 func (a *App) processUpload(t UploadTask) {
 	ctx := context.Background()
-	defer os.Remove(t.tmpPath) // always clean up our temp file
 
 	log.Printf("upload start photo=%s key=%s size=%d", t.photoID, t.key, t.size)
-	f, err := os.Open(t.tmpPath)
-	if err != nil {
-		log.Printf("upload failed photo=%s: %v", t.photoID, err)
-		_ = a.Store.MarkPhotoFailed(ctx, t.photoID)
-		return
+
+	var body io.Reader
+	if t.data != nil {
+		// Small file: already in memory — no disk I/O needed.
+		body = bytes.NewReader(t.data)
+	} else {
+		// Large file: disk-backed temp file — must clean up after use.
+		defer os.Remove(t.tmpPath)
+		f, err := os.Open(t.tmpPath)
+		if err != nil {
+			log.Printf("upload failed photo=%s: %v", t.photoID, err)
+			_ = a.Store.MarkPhotoFailed(ctx, t.photoID)
+			return
+		}
+		defer f.Close()
+		body = f
 	}
-	err = a.S3.PutObject(ctx, t.key, f, t.size, t.contentType)
-	f.Close()
+
+	err := a.S3.PutObject(ctx, t.key, body, t.size, t.contentType)
 	if err != nil {
 		log.Printf("upload failed photo=%s: %v", t.photoID, err)
 		_ = a.Store.MarkPhotoFailed(ctx, t.photoID)
@@ -117,6 +132,7 @@ func (a *App) PutAlbum(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
 		return
 	}
+	a.albumCache.Store(in.AlbumID, struct{}{})
 	c.JSON(http.StatusOK, in)
 }
 
@@ -148,12 +164,15 @@ func (a *App) UploadPhoto(c *gin.Context) {
 	// accessed concurrently.
 	ctx := c.Request.Context()
 
-	if _, err := a.Store.GetAlbum(ctx, albumID); err == store.ErrNotFound {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
-		return
+	if _, cached := a.albumCache.Load(albumID); !cached {
+		if _, err := a.Store.GetAlbum(ctx, albumID); err == store.ErrNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		} else if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
+			return
+		}
+		a.albumCache.Store(albumID, struct{}{})
 	}
 
 	fileHeader, err := c.FormFile("photo")
@@ -172,10 +191,10 @@ func (a *App) UploadPhoto(c *gin.Context) {
 	}
 
 	// Take ownership of the file before returning — O(1) rename for large files,
-	// in-memory copy for small ones. The async worker must not use fileHeader
+	// in-memory bytes for small ones. The async worker must not use fileHeader
 	// after this point; Gin may clean up the original multipart temp file once
 	// the handler returns.
-	tmpPath, size, ct, err := stealFile(fileHeader)
+	data, tmpPath, size, ct, err := stealFile(fileHeader)
 	if err != nil {
 		log.Printf("temp copy failed photo=%s: %v", photoID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
@@ -184,14 +203,16 @@ func (a *App) UploadPhoto(c *gin.Context) {
 
 	p := model.Photo{PhotoID: photoID, AlbumID: albumID, Seq: seq, Status: "processing", StagingKey: stagingKey}
 	if err := a.Store.PutPhoto(ctx, p); err != nil {
-		os.Remove(tmpPath)
+		if tmpPath != "" {
+			os.Remove(tmpPath)
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
 		return
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{"photo_id": photoID, "seq": seq, "status": "processing"})
 
-	a.UploadJobs <- UploadTask{tmpPath: tmpPath, size: size, contentType: ct, key: stagingKey, photoID: photoID}
+	a.UploadJobs <- UploadTask{data: data, tmpPath: tmpPath, size: size, contentType: ct, key: stagingKey, photoID: photoID}
 }
 
 func (a *App) GetPhoto(c *gin.Context) {
@@ -246,12 +267,13 @@ func (a *App) DeletePhoto(c *gin.Context) {
 // stealFile takes ownership of the multipart file before the handler returns,
 // preventing Gin's cleanup from racing with the upload worker.
 // For disk-backed files (>32 MB) it renames the existing temp file — one O(1)
-// syscall, no data copied. For in-memory files it writes from RAM to a new temp
-// file (fast — source is already in memory). Caller must os.Remove the path.
-func stealFile(fh *multipart.FileHeader) (path string, size int64, contentType string, err error) {
+// syscall, no data copied. For in-memory files it reads bytes into a []byte
+// slice — no disk touch at all. Returns (data, tmpPath, size, contentType, err):
+// exactly one of data or tmpPath will be non-zero.
+func stealFile(fh *multipart.FileHeader) (data []byte, tmpPath string, size int64, contentType string, err error) {
 	src, err := fh.Open()
 	if err != nil {
-		return "", 0, "", err
+		return nil, "", 0, "", err
 	}
 	defer src.Close()
 
@@ -264,23 +286,17 @@ func stealFile(fh *multipart.FileHeader) (path string, size int64, contentType s
 	if osFile, ok := src.(*os.File); ok {
 		dst := osFile.Name() + ".as"
 		if rerr := os.Rename(osFile.Name(), dst); rerr == nil {
-			return dst, fh.Size, ct, nil
+			return nil, dst, fh.Size, ct, nil
 		}
-		// Cross-device rename failed; fall through to copy.
+		// Cross-device rename failed; fall through to in-memory copy.
 	}
 
-	// Small files (≤32 MB): source is in RAM. Write to our own temp file.
-	tmp, err := os.CreateTemp("", "album-store-*")
+	// Small files (≤32 MB): source is in RAM. Read into a byte slice — no disk I/O.
+	buf, err := io.ReadAll(src)
 	if err != nil {
-		return "", 0, "", err
+		return nil, "", 0, "", err
 	}
-	defer tmp.Close()
-	n, err := io.Copy(tmp, src)
-	if err != nil {
-		os.Remove(tmp.Name())
-		return "", 0, "", err
-	}
-	return tmp.Name(), n, ct, nil
+	return buf, "", int64(len(buf)), ct, nil
 }
 
 func ext(fh *multipart.FileHeader) string {

@@ -19,8 +19,9 @@ import (
 func buildHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			MaxIdleConns:          500,
-			MaxIdleConnsPerHost:   200,
+			MaxIdleConns:          1000,
+			MaxIdleConnsPerHost:   500,
+			MaxConnsPerHost:       500,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,

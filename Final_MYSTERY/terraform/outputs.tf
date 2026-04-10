@@ -6,10 +6,6 @@ output "bucket_name" {
   value = aws_s3_bucket.photos.bucket
 }
 
-output "queue_url" {
-  value = aws_sqs_queue.photo_jobs.id
-}
-
 output "albums_table" {
   value = aws_dynamodb_table.albums.name
 }
