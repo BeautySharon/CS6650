@@ -20,7 +20,7 @@ type Client struct {
 
 func New(s3c *s3.Client, bucket string) *Client {
 	uploader := manager.NewUploader(s3c, func(u *manager.Uploader) {
-		u.PartSize         = 14 * 1024 * 1024 // 14 MB per part
+		u.PartSize         = 5 * 1024 * 1024 // 5 MB per part — triggers multipart for smaller files
 		u.Concurrency      = 5              // 5 parallel parts per file
 		u.LeavePartsOnError = false
 	})
