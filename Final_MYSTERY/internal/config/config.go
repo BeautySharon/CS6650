@@ -31,7 +31,7 @@ func MustLoad() Config {
 		SQSQueueURL:    getenv("SQS_QUEUE_URL", ""),
 		Port:           getenv("PORT", "8080"),
 		PresignTTL:     parseMinutes(getenv("PRESIGN_TTL_MIN", "120")),
-		WorkerParallel:  parseInt(getenv("WORKER_PARALLEL", "4"), 4),
+		WorkerParallel:  parseInt(getenv("WORKER_PARALLEL", "5"), 5),
 		UploaderCount:   parseInt(getenv("UPLOADER_COUNT", "11"), 11),
 	}
 
