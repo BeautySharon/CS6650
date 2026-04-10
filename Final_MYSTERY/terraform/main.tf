@@ -128,7 +128,7 @@ resource "aws_s3_bucket_public_access_block" "photos" {
 
 resource "aws_sqs_queue" "photo_jobs" {
   name                       = "${local.name}-photo-jobs"
-  visibility_timeout_seconds = 60
+  visibility_timeout_seconds = 120
   message_retention_seconds  = 86400
   receive_wait_time_seconds  = 20
 }
@@ -188,7 +188,7 @@ resource "aws_lb_target_group" "api" {
     path                = "/health"
     matcher             = "200"
     healthy_threshold   = 2
-    unhealthy_threshold = 2
+    unhealthy_threshold = 3  # was 2 — prevents tasks from being pulled on transient slowness
     interval            = 15
     timeout             = 5
   }
@@ -253,7 +253,7 @@ resource "aws_ecs_task_definition" "worker" {
       name        = "worker"
       image       = var.worker_image
       essential   = true
-      environment = concat(local.common_env, [{ name = "WORKER_PARALLEL", value = "4" }])
+      environment = concat(local.common_env, [{ name = "WORKER_PARALLEL", value = "50" }])
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -270,7 +270,7 @@ resource "aws_ecs_service" "api" {
   name            = "${local.name}-api"
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.api.arn
-  desired_count   = 1
+  desired_count   = var.api_desired_count
   launch_type     = "FARGATE"
 
   network_configuration {

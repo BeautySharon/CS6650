@@ -6,22 +6,44 @@ import (
 	"io"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type Client struct {
-	s3      *s3.Client
-	presign *s3.PresignClient
-	bucket  string
+	s3       *s3.Client
+	uploader *manager.Uploader
+	presign  *s3.PresignClient
+	bucket   string
 }
 
 func New(s3c *s3.Client, bucket string) *Client {
-	return &Client{s3: s3c, presign: s3.NewPresignClient(s3c), bucket: bucket}
+	uploader := manager.NewUploader(s3c, func(u *manager.Uploader) {
+		u.PartSize         = 14 * 1024 * 1024 // 10 MB per part
+		u.Concurrency      = 5               // parallel part uploads per file
+		u.LeavePartsOnError = false
+	})
+	return &Client{
+		s3:       s3c,
+		uploader: uploader,
+		presign:  s3.NewPresignClient(s3c),
+		bucket:   bucket,
+	}
 }
 
-func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, contentType string) error {
-	_, err := c.s3.PutObject(ctx, &s3.PutObjectInput{Bucket: &c.bucket, Key: &key, Body: body, ContentType: &contentType})
+// PutObject uses the S3 transfer manager, which automatically switches to
+// multipart upload for files larger than PartSize (10 MB).
+// size must be the exact byte length of body; it is sent as Content-Length so
+// the SDK avoids chunked transfer encoding and skips a seek to determine size.
+func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
+	_, err := c.uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket:        &c.bucket,
+		Key:           &key,
+		Body:          body,
+		ContentType:   &contentType,
+		ContentLength: &size,
+	})
 	return err
 }
 

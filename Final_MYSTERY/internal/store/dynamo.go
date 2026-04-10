@@ -63,6 +63,7 @@ func (s *DynamoStore) GetAlbum(ctx context.Context, albumID string) (model.Album
 	return a, nil
 }
 
+// ListAlbums fetches all albums via paginated scan.
 func (s *DynamoStore) ListAlbums(ctx context.Context) ([]model.Album, error) {
 	var outAlbums []model.Album
 	var startKey map[string]types.AttributeValue
@@ -141,6 +142,8 @@ func (s *DynamoStore) GetPhoto(ctx context.Context, photoID string) (model.Photo
 	return p, nil
 }
 
+// MarkPhotoCompleted stores final_key and url. GetPhoto generates a fresh URL
+// on read, but the stored url acts as a fallback.
 func (s *DynamoStore) MarkPhotoCompleted(ctx context.Context, photoID, finalKey, url string) error {
 	_, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.photosTable),

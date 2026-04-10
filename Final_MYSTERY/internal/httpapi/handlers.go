@@ -1,14 +1,17 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
 	"album-store/internal/model"
-	"album-store/internal/queue"
 	"album-store/internal/s3util"
 	"album-store/internal/store"
 
@@ -19,12 +22,73 @@ import (
 type App struct {
 	Store      *store.DynamoStore
 	S3         *s3util.Client
-	Queue      *queue.Client
 	PresignTTL time.Duration
+	UploadJobs chan UploadTask
+}
+
+// UploadTask carries everything a pool worker needs to complete an upload.
+// tmpPath is a file we own — the worker must delete it after use.
+type UploadTask struct {
+	tmpPath     string
+	size        int64
+	contentType string
+	key         string
+	photoID     string
+}
+
+// StartUploadWorkers launches n persistent goroutines that drain UploadJobs.
+// Call once at process startup before serving requests.
+func (a *App) StartUploadWorkers(n int) {
+	for i := 0; i < n; i++ {
+		go func() {
+			for t := range a.UploadJobs {
+				a.processUpload(t)
+			}
+		}()
+	}
+}
+
+// processUpload performs the three post-upload steps for one photo.
+func (a *App) processUpload(t UploadTask) {
+	ctx := context.Background()
+	defer os.Remove(t.tmpPath) // always clean up our temp file
+
+	log.Printf("upload start photo=%s key=%s size=%d", t.photoID, t.key, t.size)
+	f, err := os.Open(t.tmpPath)
+	if err != nil {
+		log.Printf("upload failed photo=%s: %v", t.photoID, err)
+		_ = a.Store.MarkPhotoFailed(ctx, t.photoID)
+		return
+	}
+	err = a.S3.PutObject(ctx, t.key, f, t.size, t.contentType)
+	f.Close()
+	if err != nil {
+		log.Printf("upload failed photo=%s: %v", t.photoID, err)
+		_ = a.Store.MarkPhotoFailed(ctx, t.photoID)
+		return
+	}
+	log.Printf("upload done photo=%s key=%s", t.photoID, t.key)
+
+	url, err := a.S3.PresignGet(ctx, t.key, a.PresignTTL)
+	if err != nil {
+		log.Printf("presign failed photo=%s: %v", t.photoID, err)
+		_ = a.Store.MarkPhotoFailed(ctx, t.photoID)
+		return
+	}
+	log.Printf("presign done photo=%s", t.photoID)
+
+	if err := a.Store.MarkPhotoCompleted(ctx, t.photoID, t.key, url); err != nil {
+		log.Printf("mark completed failed photo=%s: %v", t.photoID, err)
+		return
+	}
+	log.Printf("mark completed done photo=%s", t.photoID)
 }
 
 func NewRouter(app *App) *gin.Engine {
-	r := gin.Default()
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.MaxMultipartMemory = 32 << 20 // 32 MB before spilling to disk
 	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	r.PUT("/albums/:album_id", app.PutAlbum)
 	r.GET("/albums/:album_id", app.GetAlbum)
@@ -80,7 +144,11 @@ func (a *App) ListAlbums(c *gin.Context) {
 
 func (a *App) UploadPhoto(c *gin.Context) {
 	albumID := c.Param("album_id")
-	if _, err := a.Store.GetAlbum(c.Request.Context(), albumID); err == store.ErrNotFound {
+	// Extract context once before any goroutines — Gin context must not be
+	// accessed concurrently.
+	ctx := c.Request.Context()
+
+	if _, err := a.Store.GetAlbum(ctx, albumID); err == store.ErrNotFound {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	} else if err != nil {
@@ -95,33 +163,35 @@ func (a *App) UploadPhoto(c *gin.Context) {
 	}
 
 	photoID := uuid.NewString()
-	seq, err := a.Store.NextSeq(c.Request.Context(), albumID)
+	stagingKey := fmt.Sprintf("albums/%s/%s%s", albumID, photoID, ext(fileHeader))
+
+	seq, err := a.Store.NextSeq(ctx, albumID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
 		return
 	}
 
-	stagingKey := fmt.Sprintf("staging/%s/%s%s", albumID, photoID, ext(fileHeader))
-	if err := uploadMultipartFile(c, a.S3, fileHeader, stagingKey); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
-		return
-	}
-
-	p := model.Photo{PhotoID: photoID, AlbumID: albumID, Seq: seq, Status: "processing", StagingKey: stagingKey}
-	if err := a.Store.PutPhoto(c.Request.Context(), p); err != nil {
-		_ = a.S3.DeleteObject(c.Request.Context(), stagingKey)
+	// Take ownership of the file before returning — O(1) rename for large files,
+	// in-memory copy for small ones. The async worker must not use fileHeader
+	// after this point; Gin may clean up the original multipart temp file once
+	// the handler returns.
+	tmpPath, size, ct, err := stealFile(fileHeader)
+	if err != nil {
+		log.Printf("temp copy failed photo=%s: %v", photoID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
 		return
 	}
 
-	if err := a.Queue.SendPhotoJob(c.Request.Context(), queue.PhotoJob{PhotoID: photoID, AlbumID: albumID, StagingKey: stagingKey}); err != nil {
-		_ = a.Store.DeletePhoto(c.Request.Context(), photoID)
-		_ = a.S3.DeleteObject(c.Request.Context(), stagingKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "queue failed"})
+	p := model.Photo{PhotoID: photoID, AlbumID: albumID, Seq: seq, Status: "processing", StagingKey: stagingKey}
+	if err := a.Store.PutPhoto(ctx, p); err != nil {
+		os.Remove(tmpPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
 		return
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{"photo_id": photoID, "seq": seq, "status": "processing"})
+
+	a.UploadJobs <- UploadTask{tmpPath: tmpPath, size: size, contentType: ct, key: stagingKey, photoID: photoID}
 }
 
 func (a *App) GetPhoto(c *gin.Context) {
@@ -138,7 +208,16 @@ func (a *App) GetPhoto(c *gin.Context) {
 	}
 	resp := gin.H{"photo_id": p.PhotoID, "album_id": p.AlbumID, "seq": p.Seq, "status": p.Status}
 	if p.Status == "completed" {
-		resp["url"] = p.URL
+		// Prefer a fresh presigned URL; fall back to the stored URL if generation fails.
+		if p.FinalKey != "" {
+			if freshURL, err := a.S3.PresignGet(c.Request.Context(), p.FinalKey, a.PresignTTL); err == nil {
+				resp["url"] = freshURL
+			} else {
+				resp["url"] = p.URL
+			}
+		} else {
+			resp["url"] = p.URL
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -164,17 +243,44 @@ func (a *App) DeletePhoto(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func uploadMultipartFile(c *gin.Context, s3c *s3util.Client, fh *multipart.FileHeader, key string) error {
-	f, err := fh.Open()
+// stealFile takes ownership of the multipart file before the handler returns,
+// preventing Gin's cleanup from racing with the upload worker.
+// For disk-backed files (>32 MB) it renames the existing temp file — one O(1)
+// syscall, no data copied. For in-memory files it writes from RAM to a new temp
+// file (fast — source is already in memory). Caller must os.Remove the path.
+func stealFile(fh *multipart.FileHeader) (path string, size int64, contentType string, err error) {
+	src, err := fh.Open()
 	if err != nil {
-		return err
+		return "", 0, "", err
 	}
-	defer f.Close()
-	contentType := fh.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	defer src.Close()
+
+	ct := fh.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "application/octet-stream"
 	}
-	return s3c.PutObject(c.Request.Context(), key, f, contentType)
+
+	// Large files: Gin spilled to a real *os.File temp. Rename it — O(1) syscall.
+	if osFile, ok := src.(*os.File); ok {
+		dst := osFile.Name() + ".as"
+		if rerr := os.Rename(osFile.Name(), dst); rerr == nil {
+			return dst, fh.Size, ct, nil
+		}
+		// Cross-device rename failed; fall through to copy.
+	}
+
+	// Small files (≤32 MB): source is in RAM. Write to our own temp file.
+	tmp, err := os.CreateTemp("", "album-store-*")
+	if err != nil {
+		return "", 0, "", err
+	}
+	defer tmp.Close()
+	n, err := io.Copy(tmp, src)
+	if err != nil {
+		os.Remove(tmp.Name())
+		return "", 0, "", err
+	}
+	return tmp.Name(), n, ct, nil
 }
 
 func ext(fh *multipart.FileHeader) string {
