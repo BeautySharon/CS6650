@@ -2,17 +2,26 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_caller_identity" "current" {}
+
+data "aws_availability_zone" "express_az" {
+  filter {
+    name   = "zone-id"
+    values = ["usw2-az1"]
+  }
+}
+
 locals {
   name = var.project_name
-  azs  = slice(data.aws_availability_zones.available.names, 0, 2)
+  azs  = slice(data.aws_availability_zones.available.names, 0, 3)
 
   common_env = [
     { name = "AWS_REGION", value = var.aws_region },
     { name = "ALBUMS_TABLE", value = aws_dynamodb_table.albums.name },
     { name = "PHOTOS_TABLE", value = aws_dynamodb_table.photos.name },
     { name = "ALBUM_SEQ_TABLE", value = aws_dynamodb_table.album_seq.name },
-    { name = "S3_BUCKET", value = aws_s3_bucket.photos.bucket },
-    { name = "PRESIGN_TTL_MIN", value = "120" }
+    { name = "S3_BUCKET", value = aws_s3_directory_bucket.photos.bucket },
+    { name = "PRESIGN_TTL_MIN", value = "5" }
   ]
 }
 
@@ -106,16 +115,84 @@ resource "aws_cloudwatch_log_group" "api" {
   retention_in_days = 7
 }
 
-resource "aws_s3_bucket" "photos" {
-  bucket_prefix = "${local.name}-photos-"
+resource "aws_s3_directory_bucket" "photos" {
+  bucket = "${local.name}-${data.aws_caller_identity.current.account_id}--${data.aws_availability_zone.express_az.zone_id}--x-s3"
+
+  location {
+    name = data.aws_availability_zone.express_az.zone_id
+  }
+
+  force_destroy = true
 }
 
-resource "aws_s3_bucket_public_access_block" "photos" {
-  bucket                  = aws_s3_bucket.photos.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
+resource "aws_ecr_repository" "api" {
+  name         = "${local.name}-api"
+  force_delete = true
+}
+
+resource "aws_iam_role" "execution" {
+  name = "${local.name}-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "execution" {
+  role       = aws_iam_role.execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role" "task" {
+  name = "${local.name}-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "task" {
+  name = "${local.name}-task-policy"
+  role = aws_iam_role.task.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem", "dynamodb:PutItem",
+          "dynamodb:UpdateItem", "dynamodb:DeleteItem",
+          "dynamodb:Scan", "dynamodb:Query"
+        ]
+        Resource = [
+          aws_dynamodb_table.albums.arn,
+          aws_dynamodb_table.photos.arn,
+          aws_dynamodb_table.album_seq.arn
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_directory_bucket.photos.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "s3express:CreateSession"
+        Resource = aws_s3_directory_bucket.photos.arn
+      }
+    ]
+  })
 }
 
 resource "aws_dynamodb_table" "albums" {
@@ -196,13 +273,13 @@ resource "aws_ecs_task_definition" "api" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = tostring(var.api_cpu)
   memory                   = tostring(var.api_memory)
-  execution_role_arn       = var.execution_role_arn
-  task_role_arn            = var.task_role_arn
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
       name      = "api"
-      image     = var.api_image
+      image     = "${aws_ecr_repository.api.repository_url}:latest"
       essential = true
       portMappings = [
         {
@@ -232,7 +309,7 @@ resource "aws_ecs_service" "api" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [for s in aws_subnet.public : s.id]
+    subnets          = [aws_subnet.public[data.aws_availability_zone.express_az.name].id]
     security_groups  = [aws_security_group.ecs.id]
     assign_public_ip = true
   }

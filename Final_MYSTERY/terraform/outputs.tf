@@ -2,8 +2,12 @@ output "base_url" {
   value = "http://${aws_lb.api.dns_name}"
 }
 
+output "ecr_repository_url" {
+  value = aws_ecr_repository.api.repository_url
+}
+
 output "bucket_name" {
-  value = aws_s3_bucket.photos.bucket
+  value = aws_s3_directory_bucket.photos.bucket
 }
 
 output "albums_table" {

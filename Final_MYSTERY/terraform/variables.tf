@@ -8,18 +8,6 @@ variable "aws_region" {
   default = "us-west-2"
 }
 
-variable "api_image" {
-  type = string
-}
-
-variable "execution_role_arn" {
-  type = string
-}
-
-variable "task_role_arn" {
-  type = string
-}
-
 variable "api_cpu" {
   type    = number
   default = 4096
