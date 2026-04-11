@@ -31,7 +31,7 @@ func New(s3c *s3.Client, bucket string) *Client {
 }
 
 // PutObject uses the S3 transfer manager, which automatically switches to
-// multipart upload for files larger than PartSize (10 MB).
+// multipart upload for files larger than PartSize (14 MB).
 // size must be the exact byte length of body; it is sent as Content-Length so
 // the SDK avoids chunked transfer encoding and skips a seek to determine size.
 func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
