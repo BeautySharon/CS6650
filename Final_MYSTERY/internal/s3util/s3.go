@@ -2,13 +2,11 @@ package s3util
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type Client struct {
@@ -20,7 +18,7 @@ type Client struct {
 
 func New(s3c *s3.Client, bucket string) *Client {
 	uploader := manager.NewUploader(s3c, func(u *manager.Uploader) {
-		u.PartSize         = 5 * 1024 * 1024 // 5 MB per part — triggers multipart for smaller files
+		u.PartSize         = 14 * 1024 * 1024 // 14 MB per part
 		u.Concurrency      = 5              // 5 parallel parts per file
 		u.LeavePartsOnError = false
 	})
@@ -43,17 +41,6 @@ func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, size
 		Body:          body,
 		ContentType:   &contentType,
 		ContentLength: &size,
-	})
-	return err
-}
-
-func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey string) error {
-	copySource := fmt.Sprintf("%s/%s", c.bucket, srcKey)
-	_, err := c.s3.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:            &c.bucket,
-		Key:               &dstKey,
-		CopySource:        &copySource,
-		MetadataDirective: types.MetadataDirectiveCopy,
 	})
 	return err
 }

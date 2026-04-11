@@ -9,7 +9,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.13
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.51.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
-	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.9
 	github.com/gin-gonic/gin v1.10.1
 	github.com/google/uuid v1.6.0
 )

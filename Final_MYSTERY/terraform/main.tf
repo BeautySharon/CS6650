@@ -2,8 +2,6 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-data "aws_caller_identity" "current" {}
-
 locals {
   name = var.project_name
   azs  = slice(data.aws_availability_zones.available.names, 0, 2)
